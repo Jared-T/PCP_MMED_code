@@ -1,0 +1,871 @@
+---
+title:  |
+        | RadPredict R model code
+        | Jared Tavares
+date: "`r Sys.Date()`"
+output: 
+  bookdown::pdf_document2:
+    toc: false
+    number_sections: false
+---
+
+```{r setup, include=F}
+
+# Clear the environment before you begin
+rm(list=ls())
+
+# setwd("C:/Users/nicol/OneDrive/Radiological predictors of PCP/Data analysis/R")
+
+library("knitr")
+library(kableExtra)
+knitr::opts_chunk$set(echo = T, warning = F, message = F, fig.pos = 'H')
+options(digits=4)
+require("latex2exp")
+library(readxl)
+library(dplyr)
+library(readr)
+library(tidyr)
+library(ggplot2)
+library(earth)
+library(MASS)
+library(glmnet)
+library(pROC)
+library(xtable)
+library(rrpack)
+library(Metrics)
+library(stringr)
+library(tidyverse)
+library(car)
+library(broom)
+library(Hmisc)
+library(caret)
+require(rms)
+library(purrr)
+library(epiR)
+
+```
+
+
+***
+
+# Loading and setting up the data
+
+
+The code for setting up each of the individual custom variables was in the previous RadPredict RMD file. Please refer to that file if you would like to see how to create the variables. The code below is for generating the values for the tables for both continuous and categorical variables. The values for all columns are provided by the output. 
+
+```{r}
+
+#write.csv(data, "data_clean.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+
+set.seed(123)
+
+# Load the data - this is from RedCap
+data_clean = read.csv("data_clean.csv", header = T)
+
+# Exclude the patients that need to be excluded
+data_clean = data_clean %>% filter(is.na(excl_1))
+
+data_clean$response = ifelse(data_clean$micro_result.factor == "Positive", 1, 0) # 1 for positive, 0 for negative (updated)
+
+```
+
+
+
+```{r}
+##
+## Variables for the venn diagram are below
+##
+
+# Define the number lists for each condition
+tb_numbers <- c(1, 23)
+tb_numbers_lab = c(1)
+
+bp_numbers <- c(2, 22)
+vp_numbers <- c(4, 5)
+pe_numbers <- c(8, 9)
+other_numbers <- c(16, 6, 17)
+
+
+data_clean$empiricdx_1[data_clean$empiricdx_1 %in% tb_numbers]
+
+cbind(data_clean$empiricdx_1, data_clean$empiricdx_1.factor)
+
+
+# Define the condition variables
+data_clean$tb <- ifelse(!is.na(data_clean$empiricdx_1) & data_clean$empiricdx_1 %in% tb_numbers, 1,
+                        ifelse(!is.na(data_clean$empiricdx_2) & data_clean$empiricdx_2 %in% tb_numbers, 1,
+                               ifelse(!is.na(data_clean$empiricdx_3) & data_clean$empiricdx_3 %in% tb_numbers, 1, 
+                                      ifelse(!is.na(data_clean$labconfirmdx_1) & data_clean$labconfirmdx_1 %in% tb_numbers_lab ,1,0))))
+
+data_clean$bacterialPneumonia <- ifelse(!is.na(data_clean$empiricdx_1) & data_clean$empiricdx_1 %in% bp_numbers, 1,
+                                        ifelse(!is.na(data_clean$empiricdx_2) & data_clean$empiricdx_2 %in% bp_numbers, 1,
+                                               ifelse(!is.na(data_clean$empiricdx_3) & data_clean$empiricdx_3 %in% bp_numbers, 1, 0)))
+
+data_clean$viralPneumonia <- ifelse(!is.na(data_clean$empiricdx_1) & data_clean$empiricdx_1 %in% vp_numbers, 1,
+                                    ifelse(!is.na(data_clean$empiricdx_2) & data_clean$empiricdx_2 %in% vp_numbers, 1,
+                                           ifelse(!is.na(data_clean$empiricdx_3) & data_clean$empiricdx_3 %in% vp_numbers, 1, 0)))
+
+data_clean$pulmonaryOedema <- ifelse(!is.na(data_clean$empiricdx_1) & data_clean$empiricdx_1 %in% pe_numbers, 1,
+                                     ifelse(!is.na(data_clean$empiricdx_2) & data_clean$empiricdx_2 %in% pe_numbers, 1,
+                                            ifelse(!is.na(data_clean$empiricdx_3) & data_clean$empiricdx_3 %in% pe_numbers, 1, 0)))
+
+data_clean$other <- ifelse(!is.na(data_clean$empiricdx_1) & data_clean$empiricdx_1 %in% other_numbers, 1,
+                           ifelse(!is.na(data_clean$empiricdx_2) & data_clean$empiricdx_2 %in% other_numbers, 1,
+                                  ifelse(!is.na(data_clean$empiricdx_3) & data_clean$empiricdx_3 %in% other_numbers, 1, 0)))
+
+
+##
+## Custom variables included in the first tables (check these before using them for the tables below)
+## Any other custom variables can be created in a similar way.
+##
+
+
+data_clean$age = as.integer(as.numeric(difftime(as.Date(data_clean$date_admission), 
+                                                as.Date(data_clean$dob), units = "days"))/365.25)
+
+data_clean$sats_ra[which(data_clean$sats_ra == 0)] = NA
+data_clean$pa02_ra[which(data_clean$pa02_ra == 0)] = NA
+hypox_1 = which(data_clean$sats_ra < 90)
+hypox_2 = which(data_clean$pa02_ra < 7.8)
+hypox_3 = which(data_clean$comb_pf <= 300) # Changed this
+
+hypox = unique(c(hypox_1, hypox_2, hypox_3))
+hypox[which(is.na(data_clean$comb_pf))] = NA
+
+hypox
+
+data_clean$hypox = ifelse(1:104 %in% hypox, "Yes", "No")
+
+describe(data_clean$hypox)
+
+
+# Check that they went to icu after doing this
+dur_admission_1 <- as.integer(as.numeric(difftime(as.Date(data_clean$date_discharge), as.Date(data_clean$date_admission) , units = "days")))
+dur_admission_2 <- as.integer(as.numeric(difftime(as.Date(data_clean$date_inhop_death), as.Date(data_clean$date_admission), units = "days")))
+
+dur_admission_1[is.na(dur_admission_1)] = dur_admission_2[is.na(dur_admission_1)]
+
+# Duration of admission
+data_clean$dur_admission = dur_admission_1
+
+
+# Time to initiation of PCP treatment (days) - Check some of them
+time_init_pcp <- as.integer(as.numeric(difftime(as.Date(data_clean$date_pcp_rx), as.Date(data_clean$date_admission) , units = "days")))
+data_clean$time_init_pcp = time_init_pcp
+
+
+# Number of days from admission to ICU admission
+days_admit_to_icu <- as.integer(as.numeric(difftime(as.Date(data_clean$date_icu_admit), as.Date(data_clean$date_admission) , units = "days")))
+data_clean$days_admit_to_icu = days_admit_to_icu
+
+# Define mapping
+mapping = list(
+  "Tertiary" = "GSH",
+  "District/Regional" = c("VHW", "MPH", "NSH")
+)
+
+# Update `data_clean$hosp` based on mapping
+data_clean$hosp_cat <- sapply(data_clean$hosp, function(hosp_string) {
+  if (str_detect(hosp_string, mapping[["Tertiary"]])) {
+    return("Tertiary")
+  } else if (any(str_detect(hosp_string, mapping[["District/Regional"]]))) {
+    return("District/Regional")
+  } else {
+    return(NA)  # return NA if no match is found
+  }
+})
+
+# Co-diagnosis
+
+# Specify the list of numbers to check for
+check_numbers <- c(1, 2, 3, 4, 5, 6, 8, 9, 16, 17, 23)
+
+# Create the new variable
+data_clean$codiag <- ifelse(!is.na(data_clean$empiricdx_1) & data_clean$empiricdx_1 %in% check_numbers, 1,
+                            ifelse(!is.na(data_clean$empiricdx_2) & data_clean$empiricdx_2 %in% check_numbers, 1,
+                                   ifelse(!is.na(data_clean$empiricdx_3) & data_clean$empiricdx_3 %in% check_numbers, 1, 0)))
+
+data_clean$codiag = as.factor(data_clean$codiag) # 0 for no, 1 for yes
+
+data_clean$codiag
+
+# Detectable and undetectable VL
+describe(data_clean$vl)
+data_clean$vl = str_trim(data_clean$vl)
+data_clean$undetectable_vl = ifelse(data_clean$vl == "LDL" | data_clean$vl == "< 20", "Yes", "No")
+
+data_clean$undetectable_vl
+
+data_clean[, c("vl", "undetectable_vl")]
+
+
+data_clean$detectable_vl = as.numeric(data_clean$vl)
+data_clean$detectable_vl
+
+# Check for empty strings in the pf column and replace them with the corresponding value from imputedpf
+data_clean$comb_pf <- ifelse(data_clean$pf == "", data_clean$imputedpf, data_clean$pf)
+data_clean$comb_pf = as.numeric(data_clean$comb_pf)
+data_clean$comb_pf
+
+# Create the severity score
+data_clean$severity.score = 0
+
+gg_consol.score = data_clean$parenchy_yn___2 * 3 + data_clean$parenchy_yn___3 * 3
+gg_consol.score = ifelse(gg_consol.score == 6, 3, gg_consol.score)
+
+parenchymal_df = as.data.frame(cbind(data_clean$parenchy_yn___7 * 1, # Normal
+                                     data_clean$parenchy_yn___1 * 2, # R or RT
+                                     gg_consol.score # ground glass or consol
+))
+# Can't get more than 3 points - so ground glass or consol then 3 pts
+
+parenchymal_df <- parenchymal_df %>%
+  rowwise() %>%
+  mutate(sum = sum(c_across(everything())))
+
+parenchymal_df
+
+# Points for involvement for each zone - set 0 for NA
+data_clean$tot_zones[is.na(data_clean$tot_zones)] = 0
+
+data_clean$tot_zones
+
+# Point for diffuse descriptor? (check this)
+diffuse_desc = ifelse((data_clean$retic_patt_ext.factor == "Diffuse") |
+                        (data_clean$gg_ext.factor == "Diffuse") |
+                        (data_clean$consol_ext.factor == "Diffuse"), 1, 0)
+
+diffuse_desc = ifelse(is.na(diffuse_desc), 0, diffuse_desc) # Get rid of the NA values
+
+data_clean$severity.score = parenchymal_df$sum + data_clean$tot_zones + diffuse_desc
+
+#CD4 category variable
+data_clean$CD4_lt50 = ifelse (data_clean$cd4 < 50,"yes","no")
+
+# PF ratio
+data_clean$pf
+data_clean$imputedpf
+
+# Check for empty strings in the pf column and replace them with the corresponding value from imputedpf
+data_clean$comb_pf <- ifelse(data_clean$pf == "", data_clean$imputedpf, data_clean$pf)
+data_clean$comb_pf = as.numeric(data_clean$comb_pf)
+data_clean$comb_pf
+
+#alb_new
+data_clean$alb_new <- ifelse(data_clean$alb != "not done", data_clean$alb, NA)
+data_clean$alb_new = as.numeric(data_clean$alb_new)
+data_clean$alb_new
+
+# Any calcification - variables were slightly different in latest RedCap download
+data_clean$any_calc = ifelse((data_clean$retic_calcs.factor == "Yes") |
+                               (data_clean$gg_calcs.factor == "Yes") |
+                               (data_clean$consol_calcs.factor == "Yes") |
+                               (data_clean$cysts_calcs.factor == "Yes") |
+                               (data_clean$cav_calcs.factor == "Yes") |
+                               (data_clean$other_op_calcs.factor == "Yes"), "Yes", "No")
+```
+
+
+```{r}
+# Variables for table 4
+
+# Any reticular pattern - not sure whether or not to include all parenchy_yn variable or just the first one.
+data_clean$parenchy_yn___1.factor 
+
+# Nodules present - lots of NA values
+data_clean$nodules.factor
+
+# Nodules charac
+data_clean$nodules_charac.factor
+
+# Retic pattern ext
+data_clean$retic_patt_ext.factor
+
+# Retic pattern zones
+data_clean$retic_patt_zones___1.factor # RUZ
+data_clean$retic_patt_zones___2.factor # RMZ
+data_clean$retic_patt_zones___3.factor # RLZ
+data_clean$retic_patt_zones___4.factor # LUZ
+data_clean$retic_patt_zones___5.factor # LMZ
+data_clean$retic_patt_zones___6.factor # LLZ
+
+data_clean$zone_count = as.integer(data_clean$retic_patt_zones___1.factor == "Checked") +
+                         as.integer(data_clean$retic_patt_zones___2.factor == "Checked") +
+                         as.integer(data_clean$retic_patt_zones___3.factor == "Checked") +
+                         as.integer(data_clean$retic_patt_zones___4.factor == "Checked") +
+                         as.integer(data_clean$retic_patt_zones___5.factor == "Checked") +
+                         as.integer(data_clean$retic_patt_zones___6.factor == "Checked")
+
+data_clean$zone_count
+
+data_clean$zone_count[which(data_clean$zone_count == 0)] = NA  
+
+data_clean$zone_category = cut(data_clean$zone_count, breaks = c(0, 1.5, 4.5, 6), 
+                                labels = c("< 2", "2-4", "> 4"), include.lowest = TRUE, right = TRUE)
+
+data_clean$zone_category
+
+# Proportions of records with any involvement in each of the three general zones (as a proportion of all participants):
+
+# Upper zone (RUZ or LUZ)
+upper_zone_proportion_r = mean(data_clean$retic_patt_zones___1.factor == "Checked" | 
+                              data_clean$retic_patt_zones___4.factor == "Checked")
+
+# Mid zone (RMZ or LMZ)
+mid_zone_proportion_r = mean(data_clean$retic_patt_zones___2.factor == "Checked" | 
+                            data_clean$retic_patt_zones___5.factor == "Checked")
+
+# Lower zone (RLZ or LLZ)
+lower_zone_proportion_r = mean(data_clean$retic_patt_zones___3.factor == "Checked" | 
+                              data_clean$retic_patt_zones___6.factor == "Checked")
+
+# Upper zone
+data_clean$upper_zone_proportion_r = data_clean$retic_patt_zones___1.factor == "Checked" | 
+                              data_clean$retic_patt_zones___4.factor == "Checked"
+
+# Mid zone (RMZ or LMZ)
+data_clean$mid_zone_proportion_r = data_clean$retic_patt_zones___2.factor == "Checked" | 
+                            data_clean$retic_patt_zones___5.factor == "Checked"
+
+# Lower zone (RLZ or LLZ)
+data_clean$lower_zone_proportion_r = data_clean$retic_patt_zones___3.factor == "Checked" | 
+                              data_clean$retic_patt_zones___6.factor == "Checked"
+
+data_clean$retic_patt_zones___3.factor == "Checked" | 
+                              data_clean$retic_patt_zones___6.factor == "Checked"
+
+# Print the proportions
+cat("Proportion of records with Upper zone involvement:", upper_zone_proportion, "\n")
+cat("Proportion of records with Mid zone involvement:", mid_zone_proportion, "\n")
+cat("Proportion of records with Lower zone involvement:", lower_zone_proportion, "\n")
+
+# A histogram to visualise this better
+histogram(data_clean$zone_category)
+
+### GG Zones ###
+
+data_clean$gg_zones___1.factor # RUZ
+data_clean$gg_zones___2.factor # RMZ
+data_clean$gg_zones___3.factor # RLZ
+data_clean$gg_zones___4.factor # LUZ
+data_clean$gg_zones___5.factor # LMZ
+data_clean$gg_zones___6.factor # LLZ
+
+data_clean$zone_count_gg = as.integer(data_clean$gg_zones___1.factor == "Checked") +
+                         as.integer(data_clean$gg_zones___2.factor == "Checked") +
+                         as.integer(data_clean$gg_zones___3.factor == "Checked") +
+                         as.integer(data_clean$gg_zones___4.factor == "Checked") +
+                         as.integer(data_clean$gg_zones___5.factor == "Checked") +
+                         as.integer(data_clean$gg_zones___6.factor == "Checked")
+
+data_clean$zone_count_gg
+
+data_clean$zone_category_gg = cut(data_clean$zone_count_gg, breaks = c(0, 1.5, 4.5, 6), 
+                                labels = c("< 2", "2-4", "> 4"), include.lowest = TRUE, right = TRUE)
+
+
+# A histogram to visualise this better
+histogram(data_clean$zone_category_gg)
+
+# Proportions of records with any involvement in each of the three general zones (as a proportion of all participants):
+
+# Upper zone (RUZ or LUZ)
+upper_zone_proportion = mean(data_clean$gg_zones___1.factor == "Checked" | 
+                              data_clean$gg_zones___4.factor == "Checked")
+
+# Mid zone (RMZ or LMZ)
+mid_zone_proportion = mean(data_clean$gg_zones___2.factor == "Checked" | 
+                            data_clean$gg_zones___5.factor == "Checked")
+
+# Lower zone (RLZ or LLZ)
+lower_zone_proportion = mean(data_clean$gg_zones___3.factor == "Checked" | 
+                              data_clean$gg_zones___6.factor == "Checked")
+
+# Print the proportions
+cat("Proportion of records with Upper zone involvement:", upper_zone_proportion, "\n")
+cat("Proportion of records with Mid zone involvement:", mid_zone_proportion, "\n")
+cat("Proportion of records with Lower zone involvement:", lower_zone_proportion, "\n")
+
+
+### Consolidation ###
+
+data_clean$consol_zones___1.factor # RUZ
+data_clean$consol_zones___2.factor # RMZ
+data_clean$consol_zones___3.factor # RLZ
+data_clean$consol_zones___4.factor # LUZ
+data_clean$consol_zones___5.factor # LMZ
+data_clean$consol_zones___6.factor # LLZ
+
+data_clean$zone_count_c = as.integer(data_clean$consol_zones___1.factor == "Checked") +
+                         as.integer(data_clean$consol_zones___2.factor == "Checked") +
+                         as.integer(data_clean$consol_zones___3.factor == "Checked") +
+                         as.integer(data_clean$consol_zones___4.factor == "Checked") +
+                         as.integer(data_clean$consol_zones___5.factor == "Checked") +
+                         as.integer(data_clean$consol_zones___6.factor == "Checked")
+
+data_clean$zone_count_c
+
+data_clean$zone_category_c = cut(data_clean$zone_count_c, breaks = c(0, 1.5, 4.5, 6), 
+                                labels = c("< 2", "2-4", "> 4"), include.lowest = TRUE, right = TRUE)
+
+
+# A histogram to visualise this better
+histogram(data_clean$zone_category_c)
+
+# Proportions of records with any involvement in each of the three general zones (as a proportion of all participants):
+
+# Upper zone (RUZ or LUZ)
+upper_zone_proportion = mean(data_clean$consol_zones___1.factor == "Checked" | 
+                              data_clean$consol_zones___4.factor == "Checked")
+
+# Mid zone (RMZ or LMZ)
+mid_zone_proportion = mean(data_clean$consol_zones___2.factor == "Checked" | 
+                            data_clean$consol_zones___5.factor == "Checked")
+
+# Lower zone (RLZ or LLZ)
+lower_zone_proportion = mean(data_clean$consol_zones___3.factor == "Checked" | 
+                              data_clean$consol_zones___6.factor == "Checked")
+
+# Print the proportions
+cat("Proportion of records with Upper zone involvement:", upper_zone_proportion, "\n")
+cat("Proportion of records with Mid zone involvement:", mid_zone_proportion, "\n")
+cat("Proportion of records with Lower zone involvement:", lower_zone_proportion, "\n")
+```
+
+
+```{r}
+
+# Look at variable
+data_clean$mech_vent.factor
+
+```
+
+
+```{r}
+
+# The mech vent factor
+data_clean$mech_vent.factor2 = data_clean$mech_vent.factor
+
+data_clean$mech_vent.factor2[which(data_clean$mech_vent.factor == "Unknown/not reported")] = "No"
+
+data_clean$mech_vent.factor2
+
+
+```
+```{r}
+
+# The ICU admit factor creation
+data_clean$icu_admit.factor2 = data_clean$icu_admit.factor
+
+data_clean$icu_admit.factor2[which(is.na(data_clean$icu_admit.factor2))] = "No"
+
+data_clean$icu_admit.factor2
+
+
+```
+
+
+```{r}
+
+data_pcp = data_clean %>% filter(micro_result.factor == "Positive")
+data_npcp = data_clean %>% filter(micro_result.factor != "Positive")
+
+```
+
+```{r}
+
+data_clean$time_hivdx.factor
+
+```
+
+
+
+# Table value generators
+
+```{r}
+# An example for a categorical variable
+# remove .factor for non-drop down variables 
+
+library(rlang)
+
+data_clean$time_hivdx.factor
+
+variable = "time_hivdx.factor" # set your categorical variable here
+
+# Use the describe function to see which categories are being included, then add the ones you don't want below, but don't remove
+# the default.
+
+filter_values = c("default", "Unknown/not recorded") # List the filtered out values here, separated by a comma. If you don't want to 
+# filter, remove the category except for default.
+
+data_cleaned = data_clean %>% filter(! (!!sym(variable)) %in% filter_values)
+
+#cbind(data_clean$parenchy_yn___1.factor, data_cleaned$parenchy_yn___1.factor)
+
+data_pcp = data_cleaned %>% filter(micro_result.factor == "Positive")
+data_npcp = data_cleaned %>% filter(micro_result.factor != "Positive")
+
+# Convert to unordered factor
+data_cleaned[[variable]] = as.factor(data_cleaned[[variable]])
+
+# The code below relevels factor variables - skip it entirely if you don't need it
+data_cleaned[[variable]] = relevel(data_cleaned[[variable]], ref = "Prior to admission") # Replace New_Ref with the level of choice
+
+##
+## Don't change the code below, simply set the variable and run the cell
+##
+
+print("PCP Group:")
+describe(data_pcp[[variable]]) # PCP group
+
+print("Non-PCP Group")
+describe(data_npcp[[variable]]) # Non-PCP group
+
+# logistic regression
+selected = data_cleaned[[variable]]
+fit = glm(response ~ selected, data = data_cleaned, family = "binomial")
+
+# fit = glm(response ~ selected + age + chd, data = data_cleaned, family = "binomial")
+
+# extract the coefficients
+coefficients = coef(fit)
+
+# compute the Odds Ratios
+OR = exp(coefficients)
+
+print("OR")
+OR
+
+# compute the 95% confidence intervals
+CI = exp(confint(fit))
+
+# 95% conf ints
+print("Confidence Interval")
+CI
+
+# p-value
+sum = summary(fit) # P-value is under the Pr(>|z|) column (not the Intercept col)
+sum$coefficients
+
+```
+
+
+```{r}
+
+summary(data_pcp$severity.score)
+
+```
+
+
+You can do this for each of the variables you would like to assess. In your case, you would pay attention to the OR and confidence interval values associated with sex.factorFemale, which are relative to the male group in this case. Ie relative to the males, the odds of having PCP as a female are about 1.5 times higher than for males (unadjusted). The odds are about 52.42\% higher for females than for the males group.
+
+
+
+
+
+```{r}
+# An example for age (continuous variable)
+
+data_clean$severity.score
+
+data_clean$alb_new
+
+variable = "severity.score" # set your continuous variable here
+
+data_clean[[variable]] = as.numeric(data_clean[[variable]])
+
+filter_values = c(Inf, -Inf) # List the filtered out values here if you need them. If you want values less than and greater than specific values, respectively.
+
+data_cleaned = data_clean
+
+
+
+#data_cleaned[[variable]] = data_clean %>% dplyr::filter(data_cleaned[[variable]] < Inf & 
+#                                       data_cleaned[[variable]] > -Inf)
+
+# data_cleaned[[variable]]
+
+```
+
+
+```{r}
+#data_cleaned$severity.score
+```
+
+
+```{r}
+data_pcp = data_cleaned %>% filter(micro_result.factor == "Positive")
+data_npcp = data_cleaned %>% filter(micro_result.factor != "Positive")
+
+##
+## Don't change the code below, simply set the variable and run the cell
+##
+```
+
+
+
+```{r}
+print("PCP Group:")
+pcp = describe(data_pcp[[variable]]) # PCP group
+pcp
+print(summary(data_pcp[[variable]]))
+
+print("Non-PCP Group")
+npcp = describe(data_npcp[[variable]]) # Non-PCP group
+npcp
+print(summary(data_npcp[[variable]]))
+
+# Median difference
+print("Median difference")
+as.numeric(median(data_pcp[[variable]])) - as.numeric(median(data_npcp[[variable]]))
+
+# Mann-Whitney U test
+test_result = wilcox.test(data_pcp[[variable]], data_npcp[[variable]], exact = FALSE)
+
+# Bootstrap for 95% CI of the median difference
+set.seed(123)  # for reproducibility
+n_iterations <- 10000
+bootstrap_median_diffs <- numeric(n_iterations)
+
+for(i in 1:n_iterations) {
+  bootstrap_sample_pcp <- sample(data_pcp[[variable]], size = length(data_pcp[[variable]]), replace = TRUE)
+  bootstrap_sample_npcp <- sample(data_npcp[[variable]], size = length(data_npcp[[variable]]), replace = TRUE)
+  
+  bootstrap_median_diffs[i] <- median(bootstrap_sample_pcp) - median(bootstrap_sample_npcp)
+}
+
+# Compute the 95% confidence interval
+ci_lower <- quantile(bootstrap_median_diffs, 0.025, na.rm = T)  # 2.5 percentile
+ci_upper <- quantile(bootstrap_median_diffs, 0.975, na.rm = T)  # 97.5 percentile
+
+print(paste("95% Confidence Interval of the Median Difference: [", ci_lower, ", ", ci_upper, "]"))
+
+# print the p-value from the bootstrap resampling test
+print(paste("p-value: ", test_result$p.value))
+
+```
+
+
+```{r}
+##
+## Adjusted version of the OR
+##
+
+variable = "severity.score"
+
+##
+## Don't change the code below, simply set the variable and run the cell
+##
+
+# logistic regression
+selected = data_clean[[variable]]
+#fit = glm(response ~ selected, data = data_clean, family = "binomial")
+fit = glm(response ~ selected + cld.factor + codiag, data = data_clean, family = "binomial")
+
+# extract the coefficients
+coefficients = coef(fit)
+coefficients
+
+# compute the Odds Ratios
+OR = exp(coefficients)
+
+print("OR")
+OR
+
+# compute the 95% confidence intervals
+CI = exp(confint(fit))
+
+# 95% conf ints
+print("Confidence Interval")
+CI
+
+# p-value
+sum = summary(fit) # P-value is under the Pr(>|z|) column (not the Intercept col)
+sum$coefficients
+
+
+```
+
+This code performs bootstrap sampling 1000 times (you can increase this number for more precision) and then calculates the median difference for each bootstrap sample. The 2.5 and 97.5 percentiles of these bootstrap median differences are then used to form the 95\% confidence interval of the median difference.
+
+Again, please note that the calculation of the confidence interval is under the assumption that the median difference follows the empirical distribution of the bootstrap samples, which might not be the case in reality.
+
+
+# PCP vs Severe PCP for Table 5
+
+```{r}
+
+# Get rid of the NA values
+data_clean$icu_admit.factor = ifelse(is.na(data_clean$icu_admit.factor), "No", data_clean$icu_admit.factor)
+data_clean$ref_icu.factor = ifelse(is.na(data_clean$ref_icu.factor), "No", data_clean$ref_icu.factor)
+
+# Create a severe PCP variable (composite) - This is just the initial variable - It will be adjusted in the code below - also do not know where the or | and and & should go below (unclear in the doc)
+data_clean$severe_pcp = ifelse((data_clean$icu_admit.factor == "Yes" | data_clean$ref_icu.factor == "Yes" | 
+                                data_clean$comb_pf <= 100 | data_clean$inhosp_death.factor == "Yes"), "Yes", "No")
+
+
+describe(data_clean$severe_pcp)
+
+data_pcp = data_clean %>% filter(micro_result.factor == "Positive" & severe_pcp == "No")
+data_spcp = data_clean %>% filter(micro_result.factor == "Positive" & severe_pcp == "Yes")
+
+```
+
+
+
+```{r}
+# An example for a categorical variable
+# remove .factor for non-drop down variables 
+
+library(rlang)
+
+variable = "mech_vent.factor" # set your categorical variable here
+
+# Use the describe function to see which categories are being included, then add the ones you don't want below, but don't remove
+# the default.
+
+filter_values = c("default", "Unknown/not recorded") # List the filtered out values here, separated by a comma. If you don't want to 
+# filter, remove the category except for default.
+
+data_cleaned = data_clean %>% filter(! (!!sym(variable)) %in% filter_values)
+
+data_pcp = data_cleaned %>% filter(micro_result.factor == "Positive" & severe_pcp == "No")
+data_spcp = data_cleaned %>% filter(micro_result.factor == "Positive" & severe_pcp == "Yes")
+
+##
+## Don't change the code below, simply set the variable and run the cell
+##
+
+print("PCP Group:")
+describe(data_pcp[[variable]]) # PCP group
+
+print("Severe-PCP Group")
+describe(data_spcp[[variable]]) # Severe-PCP group
+
+# logistic regression
+selected = data_clean[[variable]]
+fit = glm(response ~ selected, data = data_cleaned, family = "binomial")
+
+# extract the coefficients
+coefficients = coef(fit)
+
+# compute the Odds Ratios
+OR = exp(coefficients)
+
+print("OR")
+OR
+
+# compute the 95% confidence intervals
+CI = exp(confint(fit))
+
+# 95% conf ints
+print("Confidence Interval")
+CI
+
+# p-value
+sum = summary(fit) # P-value is under the Pr(>|z|) column (not the Intercept col)
+sum$coefficients
+
+```
+
+
+```{r}
+# An example for age (continuous variable)
+
+variable = "alb_new" # set your continuous variable here
+
+
+filter_values = c(Inf, -Inf) # List the filtered out values here if you need them. If you want values less than and greater than specific values, respectively.
+
+data_cleaned = data_clean %>% filter(variable < filter_values[1] & 
+                                       variable > filter_values[2])
+
+data_pcp = data_cleaned %>% filter(micro_result.factor == "Positive" & severe_pcp == "No")
+data_spcp = data_cleaned %>% filter(micro_result.factor == "Positive" & severe_pcp == "Yes")
+
+##
+## Don't change the code below, simply set the variable and run the cell
+##
+
+
+print("PCP Group:")
+pcp = describe(data_pcp[[variable]]) # PCP group
+pcp
+
+print("Severe-PCP Group")
+spcp = describe(data_spcp[[variable]]) # Severe-PCP group
+spcp
+
+# Median difference
+print("Median difference")
+as.numeric(pcp$counts[10]) - as.numeric(spcp$counts[10])
+
+# Mann-Whitney U test
+test_result = wilcox.test(data_pcp[[variable]], data_spcp[[variable]], exact = FALSE)
+
+# Bootstrap for 95% CI of the median difference
+set.seed(123)  # for reproducibility
+n_iterations <- 10000
+bootstrap_median_diffs <- numeric(n_iterations)
+
+for(i in 1:n_iterations) {
+  bootstrap_sample_pcp <- sample(data_pcp[[variable]], size = length(data_pcp[[variable]]), replace = TRUE)
+  bootstrap_sample_spcp <- sample(data_spcp[[variable]], size = length(data_spcp[[variable]]), replace = TRUE)
+  
+  bootstrap_median_diffs[i] <- median(bootstrap_sample_pcp) - median(bootstrap_sample_spcp)
+}
+
+# Compute the 95% confidence interval
+ci_lower <- quantile(bootstrap_median_diffs, 0.025, na.rm = T)  # 2.5 percentile
+ci_upper <- quantile(bootstrap_median_diffs, 0.975, na.rm = T)  # 97.5 percentile
+
+print(paste("95% Confidence Interval of the Median Difference: [", ci_lower, ", ", ci_upper, "]"))
+
+# print the p-value from the bootstrap resampling test
+print(paste("p-value: ", test_result$p.value))
+
+```
+
+# Venn Diagram
+
+
+```{r}
+
+library(VennDiagram)
+
+# TODO: Add nicer names for the files. Add the file save code too.
+
+dataset = data_npcp # Set the dataset here (either data_pcp or data_npcp)
+
+# Create lists for each condition
+input = list(TB = dataset$record_id[which(dataset$tb == 1)], 
+                  BacterialPneumonia = dataset$record_id[which(dataset$bacterialPneumonia == 1)], 
+                  ViralPneumonia = dataset$record_id[which(dataset$viralPneumonia == 1)],
+                  PulmonaryOedema = dataset$record_id[which(dataset$pulmonaryOedema == 1)],
+                  Other = dataset$record_id[which(dataset$other == 1)])
+
+#input
+
+# Create the Venn diagram
+venn.plot <- venn.diagram(x = input, filename = NULL, fill = c("skyblue", "pink1", "mediumorchid", "orange", "green"), alpha = 0.50,
+                          label.col = "black", cex = 1.5, fontfamily = "serif", fontface = "bold",
+                          cat.default.pos = "text", cat.default.cex = 1.5, cat.default.fontfamily = "serif", 
+                          cat.default.fontface = "bold", cat.col = c("skyblue", "pink1", "mediumorchid", "orange", "green"))
+
+?venn.diagram()
+
+grid.draw(venn.plot)
+
+```
+
+
+
+These diagrams can actually be saved to a file externally if you need them to be high quality. Play around with colours etc if you would like.
+
+
+

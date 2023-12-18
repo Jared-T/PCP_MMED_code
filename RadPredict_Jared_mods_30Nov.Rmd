@@ -1,0 +1,905 @@
+---
+title:  |
+        | RadPredict R model code
+        | Jared Tavares
+date: "`r Sys.Date()`"
+output: 
+  bookdown::pdf_document2:
+    toc: false
+    number_sections: false
+---
+
+```{r setup, include=F}
+
+# Clear the environment before you begin
+rm(list=ls())
+
+library("knitr")
+library(kableExtra)
+knitr::opts_chunk$set(echo = T, warning = F, message = F, fig.pos = 'H')
+options(digits=4)
+require("latex2exp")
+library(readxl)
+library(dplyr)
+library(readr)
+library(tidyr)
+library(ggplot2)
+library(earth)
+library(MASS)
+library(glmnet)
+library(pROC)
+library(xtable)
+library(rrpack)
+library(Metrics)
+library(stringr)
+library(tidyverse)
+library(car)
+library(broom)
+library(Hmisc)
+library(caret)
+require(rms)
+
+```
+
+
+***
+
+# Loading and setting up the data
+
+This data is exactly the same as the table code data. I am simply loading it here to avoid all the variable steps again.
+
+```{r}
+
+set.seed(123)
+
+# Load in the now updated table code
+data_clean = read.csv("data_clean_2nov.csv", stringsAsFactors = T)
+
+# Subset the data
+data_clean <- subset(data_clean, select = c("response", "comb_pf", "parenchy_yn___1.factor", "parenchy_yn___2.factor", 
+                                             "parenchy_yn___3.factor", "gg_ext.factor", "pleural_abn___2.factor", 
+                                             "codiag", "hypox", "tot_zones", "cld.factor", "micro_result.factor",
+                                            "ref_icu.factor", "inhosp_death.factor", "icu_admit.factor", "severity.score"))
+
+# Create a datadist object for your data
+dd <- datadist(data_clean)
+options(datadist = 'dd')
+
+
+```
+
+
+# Model choice
+
+We are dealing with a binary outcome variable (PCP), so a binary logistic regression is a good choice to model the relationship between the outcome and the predictors. The reason for this is that the logistic function transforms the range from negative infinity to positive infinity in a regular linear model and rescales it to lie between 0 and 1, which is perfect for modelling the probability of an event (PCP in this case). I won't go into more detail here, but this is the basic idea.
+
+Another point to note is that the logistic model is a direct probability model, meaning that it is stated in terms of the probability of PCP given the predictors of interest. Since the distribution of a binary random variable is completely defined by the true probability of PCP and since the model makes no distributional assumptions about the predictors, the logistic model makes no distributional assumptions whatsoever.
+
+## Model assumptions
+
+The only assumptions made by the logistic regression model relate to the form of the regression equation. They are linearity and the lack of interaction between parameters, which are easily verifiable.
+
+# Model 1: PCP vs Non-PCP
+
+## Checking the predictors
+
+```{r}
+# Comb_pf
+describe(data_clean$comb_pf)
+
+# CLD - removed, still shown here just in case
+describe(data_clean$cld)
+
+# Reticular pattern
+describe(data_clean$parenchy_yn___1.factor)
+data_clean$parenchy_yn___1.factor = relevel(as.factor(data_clean$parenchy_yn___1.factor), ref = "Unchecked")
+
+# Ground glass
+describe(data_clean$parenchy_yn___2.factor)
+
+# Consolidation
+describe(data_clean$parenchy_yn___3.factor)
+data_clean$parenchy_yn___3.factor = relevel(as.factor(data_clean$parenchy_yn___3.factor), ref = "Unchecked")
+
+# diffuse ground glass - check what to do about NAs in this variable
+data_clean$gg_ext.factor = as.character(data_clean$gg_ext.factor)
+data_clean$gg_ext.factor
+data_clean$gg_ext.factor = ifelse(is.na(data_clean$gg_ext.factor), "None", data_clean$gg_ext.factor)
+describe(data_clean$gg_ext.factor)
+data_clean$gg_ext.factor = relevel(as.factor(data_clean$gg_ext.factor), ref = "None")
+
+# Pleural effusion - check if this is the correct variable
+describe(data_clean$pleural_abn___2.factor)
+data_clean$pleural_abn___2.factor = relevel(as.factor(data_clean$pleural_abn___2.factor), ref = "Unchecked")
+
+# Codiagnosis 
+data_clean$codiag = as.factor(data_clean$codiag)
+describe(data_clean$codiag)
+
+# Hypoxia
+data_clean$hypox = as.factor(data_clean$hypox)
+
+```
+
+
+## Model building
+
+```{r}
+
+# CLD and codiag removed
+ptrans = transcan(~ hypox + parenchy_yn___1.factor + parenchy_yn___3.factor + 
+                    gg_ext.factor + pleural_abn___2.factor, 
+                  imputed = T, transformed = T,
+                  categorical = c("hypox", "parenchy_yn___1.factor", "parenchy_yn___3.factor", 
+                                  "gg_ext.factor", "pleural_abn___2.factor"),
+                  data = data_clean, pl = F, pr = F)
+
+# Imputed the missing two values from the combined pf score
+imp = impute(ptrans, data = data_clean, list.out = T)
+
+# Impute the missing values for the gg_ext - check these results
+data_clean$gg_ext_imp.factor = imp$gg_ext.factor
+#data_clean$comb_pf_imp = imp$comb_pf
+
+```
+
+```{r}
+
+# get the transformed dataset
+trans = ptrans$transformed
+trans
+
+```
+
+
+```{r}
+
+# Model with untransformed data
+fit1.1 = lrm(response ~ hypox + parenchy_yn___1.factor + parenchy_yn___3.factor + 
+                    gg_ext_imp.factor + pleural_abn___2.factor, 
+           data = data_clean)
+
+#fit1.2 = lrm(response ~ hypox + parenchy_yn___1.factor + parenchy_yn___3.factor + 
+#                    gg_ext_imp.factor + pleural_abn___2.factor, 
+#           data = data_clean)
+
+# Untransformed with codiag for checking differences
+fit1.3 = lrm(response ~ hypox + parenchy_yn___1.factor + parenchy_yn___3.factor + 
+                    gg_ext_imp.factor + pleural_abn___2.factor + codiag, 
+           data = data_clean)
+
+# Untransformed with codiag and cld for checking differences
+fit1.4 = lrm(response ~ hypox + parenchy_yn___1.factor + parenchy_yn___3.factor + 
+                    gg_ext_imp.factor + pleural_abn___2.factor + codiag + cld.factor, 
+           data = data_clean)
+
+# Expand the continuous variable using a spline
+#fit2 = lrm(response ~ rcs(log(comb_pf_imp),4) + parenchy_yn___1.factor + parenchy_yn___3.factor + 
+#                    gg_ext_imp.factor + pleural_abn___2.factor, 
+#           data = data_clean)
+
+# Fit a binary logistic model on the transformed variables
+fit3 = lrm(response ~ trans,
+           data = data_clean)
+
+
+# Compare the models using AIC - smaller is better
+c(fit1.1 = AIC(fit1.1), 
+  #fit1.2 = AIC(fit1.2),
+  fit1.3 = AIC(fit1.3),
+  fit1.4 = AIC(fit1.4),
+  #fit2 = AIC(fit2), 
+  fit3 = AIC(fit3))
+
+fit = fit1.1
+
+```
+
+Based on AIC, the more traditional model fitted on the raw data and assuming linearity for all the continuous predictors has only a small chance of producing worse cross-validated predictive accuracy than other methods. The chances are also good that the effect estimates from this simple model will have competitive mean squared errors (MSE). We therefore select fit1.1.
+
+
+```{r}
+
+# Perform a likelihood ratio test on the model with cld and codiag vs not
+# Install and load the lmtest package if you haven't already
+#install.packages("lmtest")
+library(lmtest)
+
+# Perform the likelihood ratio test using lrtest
+lr_test_result1 <- lrtest(fit1.1, fit1.3)
+lr_test_result2 <- lrtest(fit1.1, fit1.4)
+
+# Print the test result
+print(lr_test_result1)
+print(lr_test_result2)
+
+```
+
+**Interpretation**:
+
+The significantly low p-value suggests that adding `codiag` and `cld.factor` to the model (going from Model 1 to Model 2) improves the model's ability to explain the variability in the response variable. This means that these additional variables are important predictors in your model.
+
+In practical terms, you would likely choose Model 2 over Model 1 for further analysis and interpretation, given its better fit and the statistical significance of the additional predictors. However, since it does not make biological sense to include `codiag` and `cld.factor` in the model, fit1.1 is still preferred.
+
+
+### Description of the fitted model
+
+```{r}
+# Age and sex seem to be highly insignificant in determining PCP
+print(fit, latex=T)
+```
+
+
+```{r}
+an = anova(fit)
+an
+
+# Get a latex table of the factors
+print(xtable(an), type = "latex")
+```
+
+
+```{r}
+# Ranking of apparent importance of predictors of PCP - first using ANOVA and then glm
+plot(an)
+
+fit_test = glm(response ~ hypox + parenchy_yn___1.factor + parenchy_yn___3.factor + 
+                    gg_ext_imp.factor + pleural_abn___2.factor,
+           data = data_clean, family = "binomial")
+
+# Second variable importance measure
+varImp(fit_test)
+
+# Get the fit stats
+s = fit$stats
+
+
+# Calculate the Houwelingen-Le Cessie heuristic shrinkage estimate. This value indicates that the model how well the model
+# validate on new data (1 - gamma.hat)% worse than the current dataset.
+gamma.hat = (s['Model L.R.'] - s['d.f.'])/s['Model L.R.']
+
+# How much we expect the model to perform worse on new datasets (in terms of deviation from linear pred)
+print("Based on Le Cessie, how much worse we expect the model to perform on new datasets:")
+print(1-gamma.hat)
+```
+About 14\% worse on new datasets
+
+```{r}
+
+preds = c("hypox", "parenchy_yn___1.factor", "parenchy_yn___3.factor", 
+                    "gg_ext_imp.factor", "pleural_abn___2.factor")
+dd = datadist(data_clean[, preds]); options(datadist = 'dd')
+
+# Partial effects on the log-odds scale of the full model for PCP, along with vertical line segments showing the raw data
+# distribution of predictors
+
+# Switch the columns for the plots. Log-odds on y-axis.
+ggplot(Predict(fit), sepdiscrete = 'vertical', 
+       vnames = 'names', rdata = data_clean,
+       histSpike.opts = list(frac = function(f) .1*f/max(f) ))
+
+```
+
+```{r}
+# Interquartile-range odds ratios for continuous predictors and simple odds ratios for categorical predictors. 
+# Numbers at left are upper quartil : lower quartile or current group : reference group. The bars represent 0.9, 0.95 and 0.99
+# confidence limits. The intervals are drawn on the log odds ratio scale and labeled on the odds ratio scale. Ranges are on the
+# original scale
+plot(summary(fit), log = T)
+```
+
+### Backwards Step-Down for predictor selection
+
+
+```{r}
+# Fast backward step-down with total residual AIC as the stopping rule is used to identify the variables that explain the bulk
+# of the PCP. Later validation will take this screening of variables into account. The nomogram of the reduced model is shown below.
+fastbw(fit)
+```
+
+```{r}
+data_clean$gg_ext_imp.factor = relevel(data_clean$gg_ext_imp.factor, ref = "None")
+
+fred = lrm(response ~ hypox + gg_ext_imp.factor + pleural_abn___2.factor, data = data_clean, x = T, y = T)
+latex(fred, file = '')
+```
+```{r}
+nom = nomogram(fred,
+               fun = plogis, funlabel = "Probaility",
+               fun.at = c(.01, .05, .1, .25, .5, .75, .9, .95, .99),
+               lp.at = (-2):5,
+               fun.lp.at = qlogis(c(.25, .5, .75, .95, .99, .995)))
+
+
+# Nomogram calculating the predicted log-odds and probabilities for PCP using the step-down model. For each predictor, read the
+# points assigned on the 0-100 scale and add those points. Read the result on the Total Points and then read the corresponding 
+# predictions below it.
+plot(nom)
+
+```
+
+## Model validation
+
+### Collinearity - checking for the reduced model (fred)
+
+Although collinearity is not a very large problem for logistic regression model (like nonlinearity and overfitting), we still need to check that the parameters estimates aren't to highly correlated.
+
+```{r}
+
+rms::vif(fred)
+
+```
+
+VIF is very close to 1, so no multicollinearity, which is good (the variables are not correlated, so they explain different things). The regression coefficients for the predictors are likely reliable and not inflated due to correlations with other predictors.
+
+### Influential observations
+
+```{r}
+
+infl = which.influence(fred, .4)
+show.influence(infl, dframe = data_clean)
+
+```
+
+These observations do not follow the general trend and may be removed if they are incorrect, but it might bias the results if they are feasible. It is best to leave them in if they make medical sense.
+
+## Validating the fitted model
+
+
+```{r}
+
+set.seed(123)
+v = validate(fred, B=200)
+
+```
+
+
+```{r}
+
+# Show the variables selected from the bootstrap samples
+print(v, digits = 2)
+
+latex(v, caption = 'Bootstrap Validation, 3 predictors without stepdown', 
+      digits = 2, size = 'Ssize', file = '')
+
+```
+
+
+```{r}
+
+set.seed(123)
+v2 = validate(fred, B=200, bw = T, rule = 'p', sls =.05, type = 'individual')
+
+```
+
+
+```{r}
+# Show the variables selected from the bootstrap samples
+print(v2, digits = 2, B=15)
+```
+
+
+```{r}
+# First 15 bootstrap samples - as latex
+latex(v2, caption = 'Bootstrap Validation, 3 predictors with stepdown', 
+      digits = 2, size = 'Ssize', file = '', B = 15)
+
+```
+Now we want to view the calibration curves to check for overfitting or underfitting based on the corrected estimates in the tables above.
+
+```{r}
+
+g = function(v) v[c('Intercept', 'Slope'), 'index.corrected']
+k = rbind(g(v), g(v2))
+
+co = c(2, 5, 1)
+
+plot(0, 0, ylim = c(0, 1), xlim = c(0,1),
+     xlab = "Predicted Probability",
+     ylab = "Estimated Actual Probability", type = "n")
+legend(.45, .35, c("No stepdown", "Stepdown", "Ideal"),
+       lty = 1, col = co, cex = 0.8, bty = "n")
+probs = seq(0, 1, length = 200); L = qlogis(probs)
+
+for (i in 1:2) {
+  P = plogis(k[i, 'Intercept'] + k[i, 'Slope'] * L)
+  lines(probs, P, col = co[i], lwd = 1)
+}
+abline(a = 0, b = 1, col = co[3], lwd = 1)
+```
+
+### ROC curve
+
+```{r}
+
+pred_prob = predict(fred, type = "fitted")
+
+# Compute ROC curve and AUC using 'pROC' package
+roc_obj = roc(data_clean$response, pred_prob)
+roc_obj # AUC is displayed in the output
+
+# Plot ROC
+plot(roc_obj)
+
+
+# Calculate the confidence interval for the AUC (DeLong method)
+auc_ci <- ci(roc_obj, conf.level = 0.95)  # 95% confidence interval by default
+print(auc_ci)
+
+```
+
+
+## Describing the fitted model
+
+
+```{r}
+print(fred, latex = T)
+```
+
+```{r}
+summary(fred)
+```
+
+
+```{r}
+
+s = summary(fred)
+
+#latex(s, file = '', size = 'Ssize', label = 'tab:lrm-confbar')
+
+#print(s)
+
+# Coefficients and their standard errors
+coef_values <- fred$coefficients
+std_errors <-  diag(sqrt(fred$var))
+
+# Calculate odds ratios and confidence intervals
+odds_ratios <- exp(coef_values)
+ci_lower <- exp(coef_values - 1.96 * std_errors)
+ci_upper <- exp(coef_values + 1.96 * std_errors)
+
+# Combine into a data frame for easy viewing
+results <- data.frame(OriginalEst = coef_values,
+                      OddsRatio = odds_ratios, 
+                      LowerCI95 = ci_lower, 
+                      UpperCI95 = ci_upper)
+
+print(results)
+
+
+```
+
+
+
+```{r}
+
+# Partial effects on the log-odds scale of the full model for PCP, along with vertical line segments showing the raw data
+# distribution of predictors
+ggplot(Predict(fred), sepdiscrete = 'vertical', 
+       vnames = 'names', rdata = data_clean,
+       histSpike.opts = list(frac = function(f) .1*f/max(f) ))
+
+```
+
+```{r}
+
+# Interquartile-range odds ratios for continuous predictors and simple odds ratios for categorical predictors. 
+# Numbers at left are upper quartil : lower quartile or current group : reference group. The bars represent 0.9, 0.95 and 0.99
+# confidence limits. The intervals are drawn on the log odds ratio scale and labeled on the odds ratio scale. Ranges are on the
+# original scale
+plot(s, log = T)
+
+```
+
+```{r}
+# Effects of predictors on the probability of PCP
+# TODO: Add prob on y-axis
+p = Predict(fred, hypox,  gg_ext_imp.factor, pleural_abn___2.factor, fun = plogis)
+ggplot(p)
+```
+
+
+
+```{r}
+
+nom2 = nomogram(fred,
+               fun = plogis, funlabel = "Probaility",
+               fun.at = c(.01, .05, .1, .25, .5, .75, .9, .95, .99),
+               lp.at = (-5):5,
+               fun.lp.at = qlogis(c(0.01, 0.05 ,0.1, .25, .5, .75, .95, .99))
+               )
+
+
+# Nomogram calculating the predicted log-odds and probabilities for PCP using the final. For each predictor, read the
+# points assigned on the 0-100 scale and add those points. Read the result on the Total Points and then read the corresponding 
+# predictions below it.
+plot(nom2)
+
+```
+
+# Model 2: Severe PCP vs PCP
+
+
+## Prepare the data
+
+```{r}
+
+data_pcp = data_clean %>% filter(micro_result.factor == "Positive")
+
+# Create the response variable
+data_pcp$response <- ifelse(!is.na(data_pcp$ref_icu.factor) & data_pcp$ref_icu.factor == "Yes", 1,
+                            ifelse(!is.na(data_pcp$inhosp_death.factor) & data_pcp$inhosp_death.factor == "Yes", 1,
+                                   ifelse(!is.na(data_pcp$icu_admit.factor) & data_pcp$icu_admit.factor == "Yes", 1,
+                                          ifelse(!is.na(data_pcp$comb_pf) & data_pcp$comb_pf < 100, 1, 0))))
+
+
+  
+# Reticular pattern
+describe(data_pcp$parenchy_yn___1.factor)
+data_pcp$parenchy_yn___1.factor = relevel(as.factor(data_pcp$parenchy_yn___1.factor), ref = "Unchecked")
+
+# Consolidation
+describe(data_pcp$parenchy_yn___3.factor)
+data_pcp$parenchy_yn___3.factor = relevel(as.factor(data_pcp$parenchy_yn___3.factor), ref = "Unchecked")
+
+# Diffuse ground glass - check what to do about NAs in this variable
+data_pcp$gg_ext.factor
+describe(data_pcp$gg_ext_imp.factor)
+data_pcp$gg_ext_imp.factor = relevel(as.factor(data_pcp$gg_ext_imp.factor), ref = "None")
+
+# Total zones of involvement
+describe(data_pcp$tot_zones)
+
+levels = sort(unique(data_pcp$tot_zones))
+data_pcp$tot_zones_ord = factor(data_pcp$tot_zones, ordered = TRUE)
+
+data_pcp$tot_zones_ord
+
+```
+
+
+## Model building
+
+```{r}
+
+ptrans = transcan(~ tot_zones_ord + parenchy_yn___1.factor + parenchy_yn___3.factor + 
+                    gg_ext_imp.factor, 
+                  imputed = T, transformed = T,
+                  categorical = c("tot_zones_ord", "parenchy_yn___1.factor", "parenchy_yn___3.factor", 
+                                  "gg_ext_imp.factor"),
+                  data = data_pcp, pl = F, pr = F)
+
+# Imputed the missing two values from the combined pf score
+imp = impute(ptrans, data = data_pcp, list.out = T)
+
+# get the transformed dataset
+trans = ptrans$transformed
+
+```
+
+
+
+
+```{r}
+
+# Model with untransformed data
+fit1.1 = lrm(response ~ tot_zones + parenchy_yn___1.factor + parenchy_yn___3.factor + 
+                    gg_ext_imp.factor, 
+           data = data_pcp)
+
+# Logged tot_zones
+fit1.2 = lrm(response ~ log(tot_zones) + parenchy_yn___1.factor + parenchy_yn___3.factor + 
+                    gg_ext_imp.factor, 
+           data = data_pcp)
+
+# ordinal tot_zones
+fit1.3 = lrm(response ~ tot_zones_ord + parenchy_yn___1.factor + parenchy_yn___3.factor + 
+                    gg_ext_imp.factor, 
+           data = data_pcp)
+
+# Fit a binary logistic model on the transformed variables
+fit2 = lrm(response ~ trans, 
+           data = data_pcp)
+
+
+# Model fitted with the severity score
+fit3 = lrm(response ~ severity.score, 
+           data = data_pcp)
+
+# Compare the models using AIC - smaller is better
+c(fit1.1 = AIC(fit1.1),
+  fit1.2 = AIC(fit1.2), 
+  fit1.3 = AIC(fit1.3), 
+  fit2 = AIC(fit2), 
+  fit3 = AIC(fit3))
+
+```
+
+The simplest model performs very well, so we will keep it. The model trained on the severity score alone performed the worst.
+
+## Description of the fitted model so far
+
+```{r}
+fit = fit1.1
+
+print(fit, latex=T)
+```
+
+
+```{r}
+an = anova(fit)
+an
+
+# Get a latex table of the factors
+print(xtable(an), type = "latex")
+```
+
+
+```{r}
+# Ranking of apparent importance of predictors of PCP - first using ANOVA and then glm
+plot(an)
+
+fit_test = glm(response ~ tot_zones + parenchy_yn___1.factor + parenchy_yn___3.factor + 
+                    gg_ext_imp.factor,
+           data = data_pcp, family = "binomial")
+
+# Second variable importance measure
+varImp(fit_test)
+
+# Get the fit stats
+s = fit$stats
+
+# Calculate the Houwelingen-Le Cessie heuristic shrinkage estimate. This value indicates that the model how well the model
+# validate on new data (1 - gamma.hat)% worse than the current dataset.
+gamma.hat = (s['Model L.R.'] - s['d.f.'])/s['Model L.R.']
+
+# How much we expect the model to perform worse on new datasets (in terms of deviation from linear pred)
+1-gamma.hat
+```
+
+
+```{r}
+
+preds = c("tot_zones", "parenchy_yn___1.factor", "parenchy_yn___3.factor", 
+                    "gg_ext_imp.factor")
+dd = datadist(data_pcp[, preds]); options(datadist = 'dd')
+
+# Partial effects on the log-odds scale of the full model for PCP, along with vertical line segments showing the raw data
+# distribution of predictors
+
+# Switch the columns for the plots. Log-odds on y-axis.
+ggplot(Predict(fit), sepdiscrete = 'vertical', 
+       vnames = 'names', rdata = data_pcp,
+       histSpike.opts = list(frac = function(f) .1*f/max(f) ))
+
+```
+
+```{r}
+# Interquartile-range odds ratios for continuous predictors and simple odds ratios for categorical predictors. 
+# Numbers at left are upper quartil : lower quartile or current group : reference group. The bars represent 0.9, 0.95 and 0.99
+# confidence limits. The intervals are drawn on the log odds ratio scale and labeled on the odds ratio scale. Ranges are on the
+# original scale
+plot(summary(fit), log = T)
+```
+
+
+### Backwards Step-Down for predictor selection
+
+Now that we have a basic model, let's do some predictor selection to see if we can simplify it even further.
+
+```{r}
+# Fast backward step-down with total residual AIC as the stopping rule is used to identify the variables that explain the bulk
+# of the PCP. Later validation will take this screening of variables into account. The nomogram of the reduced model is shown below.
+fastbw(fit)
+```
+
+According to backwards selection, none of the factors accurately predict severe PCP, but we cannot use no predictors, so this is a problem.
+
+
+Now we fit the reduced model
+
+```{r}
+fred = lrm(response ~ parenchy_yn___1.factor, y = T, x = T, data = data_pcp)
+fred
+latex(fred, file = '')
+```
+```{r}
+nom = nomogram(fred,
+               fun = plogis, funlabel = "Probability",
+               fun.at = c(.01, .05, .1, .25, .5, .75, .9, .95, .99),
+               #lp.at = (-2):5,
+               fun.lp.at = qlogis(c(0.1, .25, .5, .75, .95, .99)))
+
+
+# Nomogram calculating the predicted log-odds and probabilities for PCP using the step-down model. For each predictor, read the
+# points assigned on the 0-100 scale and add those points. Read the result on the Total Points and then read the corresponding 
+# predictions below it.
+plot(nom)
+
+```
+
+## Model validation
+
+### Partial residuals
+
+```{r}
+# Check for linearity using a partial residual plot
+
+resid(fred, "partial", pl="loess")
+
+```
+
+### Collinearity
+
+Although collinearity is not a very large problem for logistic regression model (like nonlinearity and overfitting), we still need to check that the parameters estimates aren't to highly correlated.
+
+```{r}
+
+rms::vif(fred)
+
+```
+Not correlated, since only one variable included in the reduced model.
+
+### Influential observations
+
+```{r}
+
+infl = which.influence(fred, .4)
+show.influence(infl, dframe = data_pcp)
+
+```
+
+These observations do not follow the general trend and may be removed if they are incorrect, but it might bias the results if they are feasible. It is best to leave them in if they make medical sense.
+
+
+```{r}
+
+set.seed(123)
+v = validate(fred, B=200)
+
+```
+
+
+```{r}
+
+# Show the variables selected from the bootstrap samples
+print(v, digits = 2)
+
+latex(v, caption = 'Bootstrap Validation', 
+      digits = 2, size = 'Ssize', file = '')
+
+```
+
+
+```{r}
+
+set.seed(123)
+v2 = validate(fred, B=200, bw = T, rule = 'p', sls =.05, type = 'individual')
+
+```
+
+
+```{r}
+# Show the variables selected from the bootstrap samples
+print(v2, digits = 2, B=15)
+```
+
+
+```{r}
+# First 15 bootstrap samples - as latex
+latex(v2, caption = 'Bootstrap Validation, predictors with stepdown', 
+      digits = 2, size = 'Ssize', file = '', B = 15)
+
+```
+
+Now we want to view the calibration curves to check for overfitting or underfitting based on the corrected estimates in the tables above.
+
+```{r}
+
+g = function(v) v[c('Intercept', 'Slope'), 'index.corrected']
+k = rbind(g(v), g(v2))
+
+co = c(2, 5, 1)
+
+plot(0, 0, ylim = c(0, 1), xlim = c(0,1),
+     xlab = "Predicted Probability",
+     ylab = "Estimated Actual Probability", type = "n")
+legend(.45, .35, c("No stepdown", "Stepdown", "Ideal"),
+       lty = 1, col = co, cex = 0.8, bty = "n")
+probs = seq(0, 1, length = 200); L = qlogis(probs)
+
+for (i in 1:2) {
+  P = plogis(k[i, 'Intercept'] + k[i, 'Slope'] * L)
+  lines(probs, P, col = co[i], lwd = 1)
+}
+abline(a = 0, b = 1, col = co[3], lwd = 1)
+```
+
+### ROC curve
+
+```{r}
+fred2 = lrm(response ~ parenchy_yn___1.factor, y = T, x = T, data = data_pcp)
+
+pred_prob = predict(fred2, type = "fitted")
+
+# Compute ROC curve and AUC using 'pROC' package
+roc_obj = roc(data_pcp$response, pred_prob)
+roc_obj # AUC is displayed in the output
+
+# Plot ROC
+plot(roc_obj) 
+
+```
+Not a very good fit, but not much we can do.
+
+## Describing the final fitted model
+
+
+```{r}
+print(fred2, latex = T)
+```
+
+
+
+```{r}
+
+s = summary(fred2)
+
+latex(s, file = '', size = 'Ssize', label = 'tab:lrm-confbar')
+
+print(s)
+
+```
+
+
+
+```{r}
+
+# Partial effects on the log-odds scale of the full model for PCP, along with vertical line segments showing the raw data
+# distribution of predictors
+ggplot(Predict(fred2), sepdiscrete = 'vertical', 
+       vnames = 'names', rdata = data_clean,
+       histSpike.opts = list(frac = function(f) .1*f/max(f) ))
+
+```
+
+```{r}
+
+# Interquartile-range odds ratios for continuous predictors and simple odds ratios for categorical predictors. 
+# Numbers at left are upper quartil : lower quartile or current group : reference group. The bars represent 0.9, 0.95 and 0.99
+# confidence limits. The intervals are drawn on the log odds ratio scale and labeled on the odds ratio scale. Ranges are on the
+# original scale
+plot(s, log = T, xlim = c(log(0.01), log(0.9)))
+
+```
+
+```{r}
+# Effects of predictors on the probability of severe PCP
+p = Predict(fred2, fun = plogis)
+ggplot(p)
+
+```
+
+
+
+```{r}
+
+nom2 = nomogram(fred2,
+               fun = plogis, funlabel = "Probaility",
+               fun.at = c(.01, .05, .1, .25, .5, .75, .9, .95, .99),
+               lp.at = (-5):5,
+               fun.lp.at = qlogis(c(0.01, 0.05 ,0.1, .25, .5, .75, .95, .99))
+               )
+
+
+# Nomogram calculating the predicted log-odds and probabilities for PCP using the final. For each predictor, read the
+# points assigned on the 0-100 scale and add those points. Read the result on the Total Points and then read the corresponding 
+# predictions below it.
+plot(nom2)
+
+```
+
+
+
+
+

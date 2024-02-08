@@ -18,3 +18,6 @@ We conducted a retrospective analysis of medical records, with independent blind
 
 ## Conclusions
 CXR evaluation, together with bedside clinical cues, offers good accuracy (AUC > 0.8) in discriminating definite PCP from other HIV-associated respiratory diseases. 
+
+## Metadata clone of the RedCap project
+A metadata clone of the RedCap project can be found in the RadPredict_2024-02-07_1337.REDCap XML file.
